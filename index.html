@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>STL Viewer (Click to Open)</title>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #app { display: grid; grid-template-columns: 360px 1fr; height: 100%; }
+    #sidebar { padding: 12px; border-right: 1px solid #ddd; background: #fafafa; box-sizing: border-box; overflow:auto; }
+    #viewer { position: relative; }
+    #canvas { width: 100%; height: 100%; display: block; }
+
+    button {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #ccc;
+      background: #fff;
+      cursor: pointer;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .row { margin-top: 14px; }
+    .row h3 { margin: 0 0 8px; font-size: 14px; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+    .kv { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; font-size: 13px; }
+    .small { font-size: 12px; color: #555; line-height: 1.35; margin-top: 10px; }
+
+    #hud {
+      position: absolute; top: 10px; left: 10px;
+      background: rgba(255,255,255,0.92);
+      border: 1px solid rgba(0,0,0,0.12);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 12px;
+      line-height: 1.35;
+      pointer-events: none;
+      max-width: 70%;
+    }
+
+    .warn { color: #b00020; font-weight: 800; }
+    .scaleRow { display:flex; gap:8px; align-items:center; }
+    input[type="number"] { width: 140px; padding: 8px 10px; border-radius: 10px; border: 1px solid #ccc; font-weight: 700; }
+    .miniBtn { padding: 10px 12px; border-radius: 10px; border: 1px solid #ccc; background:#fff; cursor:pointer; font-weight:800; width:auto; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #ddd; background:#fff; margin-right:6px; font-size:12px; }
+  </style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/examples/jsm/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+
+<body>
+<div id="app">
+  <div id="sidebar">
+    <button id="chooseBtn">Choose STL…</button>
+    <input id="fileInput" type="file" accept=".stl" />
+
+    <button id="exportBtn" disabled>Export STL (rotated + scaled)</button>
+
+    <div class="row">
+      <h3>Rotate 90°</h3>
+      <div class="grid2">
+        <button id="rxp">+X</button><button id="rxm">−X</button>
+        <button id="ryp">+Y</button><button id="rym">−Y</button>
+        <button id="rzp">+Z</button><button id="rzm">−Z</button>
+      </div>
+      <div class="small">Orbit: drag • Zoom: wheel • Pan: right-drag</div>
+    </div>
+
+    <div class="row">
+      <h3>Scale</h3>
+      <div class="scaleRow">
+        <input id="scaleNum" type="number" value="1" step="0.1" min="0.0001" />
+        <button class="miniBtn" id="scaleDown">−</button>
+        <button class="miniBtn" id="scaleUp">+</button>
+      </div>
+      <div class="small">Scale multiplies STL units (often mm).</div>
+    </div>
+
+    <div class="row">
+      <h3>Max Frontal Dimension (max(Y, Z))</h3>
+      <div class="scaleRow">
+        <input id="mfdNum" type="number" value="" step="0.1" min="0" />
+        <button class="miniBtn" id="mfdApply">Apply</button>
+      </div>
+      <div class="small">Changing this will adjust scale so max(Y,Z) matches.</div>
+    </div>
+
+    <div class="row">
+      <h3>World-aligned bounding box</h3>
+      <div class="kv">
+        <div>Size X</div><div id="sx">—</div>
+        <div>Size Y</div><div id="sy">—</div>
+        <div>Size Z</div><div id="sz">—</div>
+        <div>Min (x,y,z)</div><div id="mins">—</div>
+        <div>Max (x,y,z)</div><div id="maxs">—</div>
+      </div>
+      <div class="small" style="margin-top:10px;">
+        <span class="pill">+X red</span>
+        <span class="pill">+Y green</span>
+        <span class="pill">+Z blue</span>
+      </div>
+    </div>
+
+    <div class="row">
+      <h3>Status</h3>
+      <div id="status" class="small">Waiting for file…</div>
+    </div>
+  </div>
+
+  <div id="viewer">
+    <canvas id="canvas"></canvas>
+    <div id="hud">
+      <div><b>Axes:</b> +X red, +Y green, +Z blue</div>
+      <div id="hudDims">No STL loaded.</div>
+      <div class="small">Air Flow arrow points −X.</div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import * as THREE from "three";
+  import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+  import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
+  import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
+
+  const statusEl = document.getElementById("status");
+  const hudDims = document.getElementById("hudDims");
+
+  const sxEl = document.getElementById("sx");
+  const syEl = document.getElementById("sy");
+  const szEl = document.getElementById("sz");
+  const minsEl = document.getElementById("mins");
+  const maxsEl = document.getElementById("maxs");
+
+  const chooseBtn = document.getElementById("chooseBtn");
+  const fileInput = document.getElementById("fileInput");
+  const exportBtn = document.getElementById("exportBtn");
+
+  const scaleNum = document.getElementById("scaleNum");
+  const scaleDown = document.getElementById("scaleDown");
+  const scaleUp = document.getElementById("scaleUp");
+
+  const mfdNum = document.getElementById("mfdNum");
+  const mfdApply = document.getElementById("mfdApply");
+
+  const canvas = document.getElementById("canvas");
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xf3f4f6);
+
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1e7);
+  camera.position.set(120, 90, 120);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.85);
+  dirLight.position.set(1, 1.5, 1);
+  scene.add(dirLight);
+
+  scene.add(new THREE.AxesHelper(80));
+  scene.add(new THREE.GridHelper(200, 20));
+
+  const loader = new STLLoader();
+  const exporter = new STLExporter();
+
+  let mesh = null;
+  let lastFilename = "model.stl";
+
+  // Coupled scale/MFD state
+  let isSyncing = false;
+  let mfdBaseAtScale1 = null; // max(Y,Z) when mesh.scale=1 for current rotation
+
+  // ----- Air Flow arrow + label -----
+  let airflowArrow = null;
+  let airflowLabel = null;
+
+  function makeTextSprite(text) {
+    const c = document.createElement("canvas");
+    const ctx = c.getContext("2d");
+
+    const fontSize = 48;
+    ctx.font = `700 ${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
+
+    const pad = 24;
+    const textW = Math.ceil(ctx.measureText(text).width);
+    c.width = textW + pad * 2;
+    c.height = fontSize + pad * 2;
+
+    const ctx2 = c.getContext("2d");
+    ctx2.font = `700 ${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
+
+    ctx2.fillStyle = "rgba(255,255,255,0.92)";
+    roundRect(ctx2, 0, 0, c.width, c.height, 18);
+    ctx2.fill();
+
+    ctx2.strokeStyle = "rgba(0,0,0,0.18)";
+    ctx2.lineWidth = 4;
+    roundRect(ctx2, 2, 2, c.width - 4, c.height - 4, 16);
+    ctx2.stroke();
+
+    ctx2.fillStyle = "rgba(10,10,10,0.92)";
+    ctx2.textBaseline = "middle";
+    ctx2.fillText(text, pad, c.height / 2);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+
+    const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false });
+    const sprite = new THREE.Sprite(mat);
+
+    const scale = 0.08; // pixels to world scalar
+    sprite.scale.set(c.width * scale, c.height * scale, 1);
+
+    return sprite;
+  }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+
+  function ensureAirflowGizmo() {
+    if (!airflowArrow) {
+      const dir = new THREE.Vector3(-1, 0, 0).normalize(); // -X
+      const origin = new THREE.Vector3(0, 0, 0);
+      airflowArrow = new THREE.ArrowHelper(dir, origin, 60, 0x222222, 12, 8);
+      scene.add(airflowArrow);
+    }
+    if (!airflowLabel) {
+      airflowLabel = makeTextSprite("Air Flow");
+      scene.add(airflowLabel);
+    }
+  }
+
+  function positionAirflowGizmo() {
+    ensureAirflowGizmo();
+
+    if (!mesh) {
+      airflowArrow.position.set(-70, 40, 0);
+      airflowArrow.setDirection(new THREE.Vector3(1, 0, 0));
+      airflowArrow.setLength(60, 12, 8);
+      airflowLabel.position.set(-120, 55, 0);
+      return;
+    }
+
+    const box = computeWorldBBox(mesh);
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size);
+    box.getCenter(center);
+
+    const margin = Math.max(size.length() * 0.12, 15);
+    const arrowLen = Math.max(size.x * 0.5, 40);
+
+    const origin = new THREE.Vector3(
+      box.min.x - arrowLen - margin,                  // start to the +X side
+      center.y + 0.25 * size.y,
+      center.z
+    );
+
+    airflowArrow.position.copy(origin);
+    airflowArrow.setDirection(new THREE.Vector3(1, 0, 0)); // point toward +X
+    airflowArrow.setLength(
+      arrowLen,
+      Math.max(arrowLen * 0.2, 10),
+      Math.max(arrowLen * 0.12, 6)
+    );
+
+    const headPos = origin.clone().add(new THREE.Vector3(-arrowLen, 0, 0));
+    airflowLabel.position.copy(headPos.add(new THREE.Vector3(-0.15 * margin, 0.35 * margin, 0)));
+  }
+
+  // ----- Utilities -----
+  function setStatus(msg, isError=false) {
+    statusEl.innerHTML = isError ? `<span class="warn">${msg}</span>` : msg;
+  }
+
+  function computeWorldBBox(obj) {
+    obj.updateMatrixWorld(true);
+    return new THREE.Box3().setFromObject(obj);
+  }
+
+  function fmt3(v) {
+    return `${v.x.toFixed(3)}, ${v.y.toFixed(3)}, ${v.z.toFixed(3)}`;
+  }
+
+  function getWorldSizeYZ(obj) {
+    const box = computeWorldBBox(obj);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    return { y: size.y, z: size.z };
+  }
+
+  // Temporarily compute MFD at scale=1 (keeping rotation/position), then restore scale
+  function computeMfdBaseAtScale1() {
+    if (!mesh) return null;
+
+    const prev = mesh.scale.x;
+    mesh.scale.setScalar(1);
+    mesh.updateMatrixWorld(true);
+
+    const yz = getWorldSizeYZ(mesh);
+    const base = Math.max(yz.y, yz.z);
+
+    mesh.scale.setScalar(prev);
+    mesh.updateMatrixWorld(true);
+
+    return base;
+  }
+
+  function updateDims() {
+    if (!mesh) {
+      sxEl.textContent = syEl.textContent = szEl.textContent = "—";
+      minsEl.textContent = maxsEl.textContent = "—";
+      hudDims.textContent = "No STL loaded.";
+      mfdBaseAtScale1 = null;
+      if (!isSyncing) mfdNum.value = "";
+      positionAirflowGizmo();
+      return;
+    }
+
+    const box = computeWorldBBox(mesh);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+
+    sxEl.textContent = size.x.toFixed(3);
+    syEl.textContent = size.y.toFixed(3);
+    szEl.textContent = size.z.toFixed(3);
+
+    minsEl.textContent = fmt3(box.min);
+    maxsEl.textContent = fmt3(box.max);
+
+    hudDims.innerHTML = `World size: <b>X</b> ${size.x.toFixed(3)} &nbsp; <b>Y</b> ${size.y.toFixed(3)} &nbsp; <b>Z</b> ${size.z.toFixed(3)}`;
+
+    // --- Update Max Frontal Dimension (max(Y,Z)) ---
+    mfdBaseAtScale1 = computeMfdBaseAtScale1();
+    const currentScale = mesh.scale.x;
+    const currentMfd = (mfdBaseAtScale1 ?? 0) * currentScale;
+
+    if (!isSyncing) {
+      mfdNum.value = Number.isFinite(currentMfd) ? currentMfd.toFixed(3) : "";
+    }
+
+    positionAirflowGizmo();
+  }
+
+  function frameObject(obj) {
+    const box = computeWorldBBox(obj);
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size);
+    box.getCenter(center);
+
+    controls.target.copy(center);
+
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const dist = maxDim * 1.6 + 10;
+    const v = new THREE.Vector3(1, 0.8, 1).normalize();
+
+    camera.position.copy(center.clone().add(v.multiplyScalar(dist)));
+    camera.near = Math.max(0.01, dist / 1000);
+    camera.far = Math.max(15000, dist * 10);
+    camera.updateProjectionMatrix();
+    controls.update();
+  }
+
+  function clearMesh() {
+    if (!mesh) return;
+    scene.remove(mesh);
+    mesh.geometry.dispose();
+    mesh.material.dispose();
+    mesh = null;
+    exportBtn.disabled = true;
+    updateDims();
+  }
+
+  function loadSTLArrayBuffer(buffer, filename="model.stl") {
+    clearMesh();
+    setStatus(`Parsing ${filename}…`);
+    lastFilename = filename;
+
+    let geom;
+    try {
+      geom = loader.parse(buffer);
+    } catch (e) {
+      console.error(e);
+      setStatus("Failed to parse STL. Check Console for details.", true);
+      return;
+    }
+
+    geom.computeVertexNormals();
+    geom.computeBoundingBox();
+
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x9aa4b2,
+      metalness: 0.05,
+      roughness: 0.75
+    });
+
+    mesh = new THREE.Mesh(geom, mat);
+
+    // Center the model at origin using its local bbox center
+    const center = new THREE.Vector3();
+    geom.boundingBox.getCenter(center);
+    mesh.position.sub(center);
+
+    // Reset transforms
+    mesh.rotation.set(0, 0, 0);
+    mesh.scale.setScalar(1);
+
+    scene.add(mesh);
+
+    // Reset UI
+    isSyncing = true;
+    scaleNum.value = "1";
+    mfdNum.value = "";
+    isSyncing = false;
+
+    frameObject(mesh);
+    exportBtn.disabled = false;
+
+    updateDims();
+    setStatus(`Loaded: ${filename}`);
+  }
+
+  // ----- File chooser -----
+  chooseBtn.addEventListener("click", () => fileInput.click());
+
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+
+    if (!file.name.toLowerCase().endsWith(".stl")) {
+      setStatus("Please choose a .stl file.", true);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => loadSTLArrayBuffer(reader.result, file.name);
+    reader.onerror = () => setStatus("File read error.", true);
+    reader.readAsArrayBuffer(file);
+  });
+
+  // ----- Rotate & scale -----
+  function rotate90(axis, sign) {
+    if (!mesh) return;
+    const d = sign * (Math.PI / 2);
+    if (axis === "x") mesh.rotation.x += d;
+    if (axis === "y") mesh.rotation.y += d;
+    if (axis === "z") mesh.rotation.z += d;
+    updateDims();
+  }
+
+  function clampScale(x) {
+    if (!Number.isFinite(x)) return 1;
+    return Math.max(0.0001, x);
+  }
+
+  function setScale(val) {
+    if (!mesh) return;
+    const s = clampScale(val);
+
+    isSyncing = true;
+    mesh.scale.setScalar(s);
+    scaleNum.value = String(s);
+    isSyncing = false;
+
+    updateDims();
+  }
+
+  function setScaleFromMfd(targetMfd) {
+    if (!mesh) return;
+
+    mfdBaseAtScale1 = computeMfdBaseAtScale1();
+    if (!mfdBaseAtScale1 || mfdBaseAtScale1 <= 0) return;
+
+    const s = clampScale(targetMfd / mfdBaseAtScale1);
+
+    isSyncing = true;
+    mesh.scale.setScalar(s);
+    scaleNum.value = String(s);
+    isSyncing = false;
+
+    updateDims();
+  }
+
+  document.getElementById("rxp").onclick = () => rotate90("x", +1);
+  document.getElementById("rxm").onclick = () => rotate90("x", -1);
+  document.getElementById("ryp").onclick = () => rotate90("y", +1);
+  document.getElementById("rym").onclick = () => rotate90("y", -1);
+  document.getElementById("rzp").onclick = () => rotate90("z", +1);
+  document.getElementById("rzm").onclick = () => rotate90("z", -1);
+
+  // Scale input: Enter or blur
+  scaleNum.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") setScale(parseFloat(scaleNum.value));
+  });
+  scaleNum.addEventListener("blur", () => setScale(parseFloat(scaleNum.value)));
+
+  function stepDelta(sign) {
+    const step = parseFloat(scaleNum.step || "0.1");
+    const cur = parseFloat(scaleNum.value || "1");
+    setScale(cur + sign * step);
+  }
+  scaleDown.addEventListener("click", () => stepDelta(-1));
+  scaleUp.addEventListener("click", () => stepDelta(+1));
+
+  // MFD input: Apply, Enter, or blur
+  mfdApply.addEventListener("click", () => {
+    const v = parseFloat(mfdNum.value);
+    if (!Number.isFinite(v) || v < 0) return;
+    setScaleFromMfd(v);
+  });
+  mfdNum.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const v = parseFloat(mfdNum.value);
+      if (!Number.isFinite(v) || v < 0) return;
+      setScaleFromMfd(v);
+    }
+  });
+  mfdNum.addEventListener("blur", () => {
+    const v = parseFloat(mfdNum.value);
+    if (!Number.isFinite(v) || v < 0) return;
+    setScaleFromMfd(v);
+  });
+
+  // ----- Export STL (bake current transform) -----
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  exportBtn.addEventListener("click", () => {
+    if (!mesh) return;
+
+    setStatus("Exporting STL…");
+
+    mesh.updateMatrixWorld(true);
+
+    const baked = mesh.geometry.clone();
+    baked.applyMatrix4(mesh.matrixWorld);
+
+    const arrayBuffer = exporter.parse(new THREE.Mesh(baked), { binary: true });
+
+    baked.dispose?.();
+
+    const base = (lastFilename || "model.stl").replace(/\.stl$/i, "");
+    const outName = `${base}_rotated_scaled.stl`;
+
+    const blob = new Blob([arrayBuffer], { type: "application/sla" });
+    downloadBlob(blob, outName);
+
+    setStatus(`Exported: ${outName}`);
+  });
+
+  // ----- Resize/render loop -----
+  function resize() {
+    const viewer = document.getElementById("viewer");
+    const w = viewer.clientWidth;
+    const h = viewer.clientHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  // Init Air Flow gizmo even before mesh loads
+  ensureAirflowGizmo();
+  positionAirflowGizmo();
+
+  setStatus("Ready. Click Choose STL…");
+</script>
+</body>
+</html>
